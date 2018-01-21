@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 
-import sys, getopt
+import argparse
 import subprocess
 import time
+import os
 import cv2
 
 # Import helper functions
@@ -11,9 +12,20 @@ import tutorial_helpers as helpers
 # Import the Python wrapper for the ELL model
 import model
 
-def send_to_hologram(messages):
+def send_data(recognized_result_list):
+    print("Calling send_to_hologram...")
+    for (recognized_text, recognized_frame_path) in recognized_result_list:
+        # encode the image in base 64
+        with open(recognized_frame_path, "rb") as image_file:
+            encoded_string = base64.b64encode(image_file.read())
+            # put all the data in json format
+            send_to_hologram(encoded_string)
+
+def send_to_hologram(messages, is_custom_cloud=False):
     # Hologram SDK only works in Python 2.7 enviroment. So we have to call its function in this way
     call_hologram_command = "sudo python2.7 send_to_hologram.py " + messages
+    if is_custom_cloud:
+        call_hologram_command = call_hologram_command + " --custom-cloud"
 
     with subprocess.Popen(call_hologram_command, shell=True, stdout=subprocess.PIPE,stderr=subprocess.PIPE, universal_newlines=True) as proc:
         for line in proc.stdout:
@@ -33,6 +45,10 @@ def get_image_from_camera(camera):
 
 # This function is from Microsoft ELL tutorials
 def process_frame(frame, categories, frame_count, output_frame_path):
+    if frame is None:
+        print("Not valid input frame! Skip...")
+        return
+
     # Get the model's input shape. We will use this information later to resize
     # images appropriately.
     input_shape = model.get_default_input_shape()
@@ -72,24 +88,25 @@ def process_frame(frame, categories, frame_count, output_frame_path):
         helpers.draw_footer(frame, footer_text)
 
         # save the processed frame
-        filepath = output_frame_path + "recognized_{}.png".format(frame_count)
-        cv2.imwrite(filepath, frame)
-        print "Processed frame {}: header text: {}, footer text: {}".format(frame_count, header_text, footer_text)
-        return header_text
+        output_file_path = os.path.join(output_frame_path, "recognized_{}.png".format(frame_count))
+        cv2.imwrite(output_file_path, frame)
+        print("Processed frame {}: header text: {}, footer text: {}".format(frame_count, header_text, footer_text))
+        return (header_text, output_file_path)
     else:
-        print "Processed frame {}: No recognized frame!"
+        print("Processed frame {}: No recognized frame!")
         return None
 
 def analyze_video(input_video_path, output_frame_path):
     # Open the video camera. To use a different camera, change the camera
     # index.
-    camera = cv2.VideoCapture(video_path)
+    camera = cv2.VideoCapture(input_video_path)
     output = []
 
     # Read the category names
     with open("categories.txt", "r") as categories_file:
         categories = categories_file.read().splitlines()
 
+    i = 0
     while (camera.isOpened()):
         # Get an image from the camera.
         start = time.time()
@@ -98,7 +115,7 @@ def analyze_video(input_video_path, output_frame_path):
         time_delta = end - start
         print("Getting frame {}, time: {:.0f}ms".format(i, time_delta*1000))
         if not (image is None):
-            result = process_frame(frame, categories, i)
+            result = process_frame(image, categories, i, output_frame_path)
             if result is not None:
                 output.append(result)
         else:
@@ -107,29 +124,47 @@ def analyze_video(input_video_path, output_frame_path):
 
     return output
 
-def main(argv):
-    input_video_path = ''
-    output_frame_path = ''
-    try:
-        opts, args = getopt.getopt(argv,"hi:o:",["input-video-path=","output-frame-path="])
-    except getopt.GetoptError:
-        print 'process_video.py -i <input_video_path> -o <output_frame_path>'
-        sys.exit(2)
-    for opt, arg in opts:
-        if opt == '-h':
-            print 'process_video.py -i <input_video_path> -o <output_frame_path>'
-            sys.exit()
-        elif opt in ("-i", "--input-video-path"):
-            input_video_path= arg
-        elif opt in ("-o", "--output-frame-path"):
-            output_frame_path= arg
-    print("Input video path {}, output recognized frame path: {}", input_video_path, output_frame_path)
-    output = analyze_video(input_video_path, output_frame_path)
-    print "Video has been fully analyzed. Sending the recognized result to Hologram clound..."
-    send_to_hologram(", ".join(output))
-    print "Done!"
+def analyze_images(input_image_dir_path, output_frame_path):
+    if not os.path.exists(input_image_dir_path):
+        print("Input image dir path {} does not exist. Return...".format(input_image_dir_path))
+        return
+
+    if not os.path.exists(output_frame_path):
+        print("Output frame path {} does not exist. Create the folder...".format(output_frame_path))
+        os.makedirs(output_frame_path)
+
+    # Read the category names
+    with open("categories.txt", "r") as categories_file:
+        categories = categories_file.read().splitlines()
+
+    output = []
+    i = 0
+    for image_name in os.listdir(input_image_dir_path):
+        image_path = os.path.join(input_image_dir_path, image_name)
+        if os.path.isfile(image_path):
+            print("Predicting image:{}".format(image_path))
+            image = cv2.imread(image_path)
+            result = process_frame(image, categories, i, output_frame_path)
+            if result is not None:
+                output.append(result)
+            i += 1
+    return output
 
 if __name__ == "__main__":
-   main(sys.argv[1:])
+    parser = argparse.ArgumentParser(description='Analyze an video through ELL and send the recognized result using Hologram')
+    parser.add_argument('-i', '--input-path', required=True, help='The path for the video or the folder containing images to be analyzed.')
+    parser.add_argument('-o', '--output-frame-path', required=True, help='The output path for recognized frame from ELL.')
+    parser.add_argument('--is-video', action='store_true', help='if the input source is video')
 
-
+    args = parser.parse_args()
+    print("Input path {}, output recognized frame path: {}".format(args.input_path, args.output_frame_path))
+    if args.is_video:
+        # The output of analyze_video will be a list of tuples which includes the recognized result and
+        # processed snapshot (frame)
+        output = analyze_video(args.input_path, args.output_frame_path)
+        print("Video has been fully analyzed. Sending the recognized result to Hologram cloud...")
+    else:
+        output = analyze_images(args.input_path, args.output_frame_path)
+        print("All images have been fully analyzed. Sending the recognized result to Hologram cloud...")
+    send_data(output)
+    print("Done!")
