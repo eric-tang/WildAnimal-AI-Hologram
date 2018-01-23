@@ -5,6 +5,7 @@ import subprocess
 import time
 import os
 import cv2
+import base64
 
 # Import helper functions
 import tutorial_helpers as helpers
@@ -14,18 +15,24 @@ import model
 
 def send_data(recognized_result_list):
     print("Calling send_to_hologram...")
+    i = 0
     for (recognized_text, recognized_frame_path) in recognized_result_list:
         # encode the image in base 64
         with open(recognized_frame_path, "rb") as image_file:
             encoded_string = base64.b64encode(image_file.read())
-            # put all the data in json format
-            send_to_hologram(encoded_string)
+            data_to_send = encoded_string.decode('ascii') + "," + recognized_text + "\n"
+            output_file_name = "Output_{}.txt".format(i)
+            with open(output_file_name, "w") as text_file:
+                text_file.write(data_to_send)
+            send_to_hologram(output_file_name)
+            i += 1
 
 def send_to_hologram(messages, is_custom_cloud=False):
     # Hologram SDK only works in Python 2.7 enviroment. So we have to call its function in this way
     call_hologram_command = "sudo python2.7 send_to_hologram.py " + messages
     if is_custom_cloud:
         call_hologram_command = call_hologram_command + " --custom-cloud"
+    # call_hologram_command = "cat {} | nc -q 0 192.168.1.14 9999".format(messages)
 
     with subprocess.Popen(call_hologram_command, shell=True, stdout=subprocess.PIPE,stderr=subprocess.PIPE, universal_newlines=True) as proc:
         for line in proc.stdout:
@@ -91,7 +98,7 @@ def process_frame(frame, categories, frame_count, output_frame_path):
         output_file_path = os.path.join(output_frame_path, "recognized_{}.png".format(frame_count))
         cv2.imwrite(output_file_path, frame)
         print("Processed frame {}: header text: {}, footer text: {}".format(frame_count, header_text, footer_text))
-        return (header_text, output_file_path)
+        return header_text
     else:
         print("Processed frame {}: No recognized frame!")
         return None
@@ -146,7 +153,7 @@ def analyze_images(input_image_dir_path, output_frame_path):
             image = cv2.imread(image_path)
             result = process_frame(image, categories, i, output_frame_path)
             if result is not None:
-                output.append(result)
+                output.append((result, image_path))
             i += 1
     return output
 
